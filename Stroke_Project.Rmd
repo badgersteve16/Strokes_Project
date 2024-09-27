@@ -1,0 +1,714 @@
+---
+title: "Stroke Project"
+author: ""
+date: ''
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r, message=FALSE}
+#load packages which may be needed
+library(dplyr)
+library(ggformula)
+library(tree)
+library(randomForest)
+library(readr)
+library(gridExtra)
+library(corrplot)
+library(RColorBrewer)
+library(caret)
+library(nnet)
+library(NeuralNetTools)
+library(RANN)
+library(pROC)
+library(yardstick)
+library(gbm)
+```
+```{r}
+stroke_df=read.csv("kaggle_stroke_dataset.csv") #read in data
+dim.data.frame(stroke_df) #get dimensions
+colnames(stroke_df) #get columns names
+head(stroke_df) #first rows of dataset
+
+```
+
+```{r}
+#step 3- exploratory data analysis and data cleaning
+
+stroke_df_count=count(stroke_df) #get number of rows in dataset
+blank_values_count=count(stroke_df[rowSums(is.na(stroke_df)) > 0, ]) #initial check for any blank rows
+
+stroke_count=count(filter(stroke_df, stroke==1)) #get number of entries with stroke
+stroke_proportion=paste("Of the", stroke_df_count, "entries in this dataset, there are", stroke_count, "entries for stroke patients, which corresponds to stroke patients making up about", round((stroke_count/stroke_df_count),3)*100,"% of the dataset. There are also",blank_values_count, "rows with blank values." ) #print proportion of stroke patients in dataset
+print(stroke_proportion, quote = FALSE)
+
+bmi_na_count=count(filter(stroke_df, bmi == 'N/A')) #get number of entries with 'N/A' for BMI
+bmi_stroke_na_count=count(filter(stroke_df, bmi == 'N/A' & stroke ==1)) #get number of entries with 'N/A' for BMI and number of stroke patients
+new_stroke_df_count=stroke_df_count-bmi_stroke_na_count #get new dataframe count if rows with 'N/A' entries for 'BMI' are removed
+
+stroke_proportion_2=paste("If N/A mentions of BMI are removed, the size of the new dataset will be", round((new_stroke_df_count)/stroke_df_count,3)*100 ,"% of the original size, with stroke patients making up about", round((stroke_count-bmi_stroke_na_count)/new_stroke_df_count,3)*100, "% of the new dataset.") #new proportion of dataset if 'N/A' entries for BMI are removed
+print(stroke_proportion_2, quote = FALSE)
+```
+```{r}
+#step 3- exploratory data analysis and data cleaning
+
+stroke_df["bmi"][stroke_df["bmi"]=="N/A"]<-NA #change values to NULL for potential imputation
+stroke_df["stroke"][stroke_df["stroke"]==0]<-"No" #change values to 'No' for more intuitive analysis 
+stroke_df["stroke"][stroke_df["stroke"]==1]<-"Yes" #change values to 'Yes' for more intuitive analysis
+
+stroke_df["hypertension"][stroke_df["hypertension"]==0]<-"No" #change values to 'No' for more intuitive analysis
+stroke_df["hypertension"][stroke_df["hypertension"]==1]<-"Yes" #change values to 'Yes' for more intuitive analysis
+
+stroke_df["heart_disease"][stroke_df["heart_disease"]==0]<-"No" #change values to 'No' for more intuitive analysis
+stroke_df["heart_disease"][stroke_df["heart_disease"]==1]<-"Yes" #change values to 'Yes' for more intuitive analysis
+
+stroke_df<-stroke_df%>% #make categorical predictors factors and remove id
+  mutate(gender=as.factor(gender), hypertension=as.factor(hypertension),heart_disease=as.factor(heart_disease),
+         ever_married=as.factor(ever_married), work_type=as.factor(work_type), Residence_type=as.factor(Residence_type), bmi=as.numeric(bmi), smoking_status=as.factor(smoking_status),
+         stroke=as.factor(stroke))%>%
+        select(-id)
+```
+```{r}
+#step 3- exploratory data analysis and data cleaning
+
+hist(stroke_df$bmi, main="Histogram plot for BMI") #histogram plot for BMI
+qqnorm(stroke_df$bmi,main="Normal Probability Plot for BMI") #normal probability plot for BMI
+qqline(stroke_df$bmi)
+```
+
+```{r}
+#step 3- exploratory data analysis and data cleaning
+
+stroke_bmi_model = preProcess(stroke_df, "knnImpute") #knn impute missing values in BMI using caret and k=5
+stroke_df = predict(stroke_bmi_model, stroke_df) #apply knn imput to stroke df to get scaled knn impute value
+col_data <- data.frame(col = names(stroke_bmi_model$mean), mean = stroke_bmi_model$mean, sd = stroke_bmi_model$std) #get col_data to re-scale data
+for(i in col_data$col){ #re-scale data for bmi level and update stroke_df
+ stroke_df[i] <- stroke_df[i]*stroke_bmi_model$std[i]+stroke_bmi_model$mean[i] 
+}
+```
+```{r,echo=FALSE,fig.height=7, fig.width=10}
+#step 3- exploratory data analysis and data cleaning. 
+#create categorical dataframes with number of observations of each level
+
+df_hypertension<-stroke_df %>% group_by(hypertension) %>% summarise(N=n()) #group by hypertension and find number of observations of each level
+df_heart_disease<-stroke_df %>% group_by(heart_disease) %>% summarise(N=n()) #group by heart disease and find number of observations of each level
+df_ever_married<-stroke_df %>% group_by(ever_married) %>% summarise(N=n()) #group by ever married and find number of observations of each level
+df_work_type<-stroke_df %>% group_by(work_type) %>% summarise(N=n()) #group by work type and find number of observations at of each level
+df_gender<-stroke_df %>% group_by(gender) %>% summarise(N=n()) #group by gender and find number of observations at of each level
+df_smoking_status<-stroke_df %>% group_by(smoking_status) %>% summarise(N=n()) #group by smoking status and find number of observations at of each level
+df_Residence_type <-stroke_df %>% group_by(Residence_type) %>% summarise(N=n()) #group by Residence Type and find number of observations at of each level
+
+#create a function so we can get a percent of each level in the categorical variable.
+percent_function<- function(col_data) {
+  col_length=length(col_data) #get length of column data which indicated number of levels
+  return_vec<-c() #output vector to append
+  for (i in 1:col_length) { #for each level
+  temp_val=paste0(round(col_data[i]/sum(col_data)*100,2),"%") #find associated percent
+  return_vec<-c(return_vec,temp_val) #append output vector
+}
+  return(return_vec) #return output vector
+}
+#add the percent of each level to each categorical dataframe by calling percent function.
+
+df_hypertension<-mutate(df_hypertension,Percent=percent_function(df_hypertension$N)) 
+df_heart_disease<-mutate(df_heart_disease,Percent=percent_function(df_heart_disease$N))
+df_ever_married<-mutate(df_ever_married,Percent=percent_function(df_ever_married$N))
+df_work_type<-mutate(df_work_type,Percent=percent_function(df_work_type$N))
+df_gender<-mutate(df_gender,Percent=percent_function(df_gender$N))
+df_smoking_status<-mutate(df_smoking_status,Percent=percent_function(df_smoking_status$N))
+df_Residence_type<-mutate(df_Residence_type,Percent=percent_function(df_Residence_type$N))
+
+#call the categorical dataframe to see if any levels should be removed
+
+df_hypertension
+df_heart_disease
+df_ever_married
+df_work_type
+df_gender
+df_smoking_status
+df_Residence_type
+```
+```{r}
+#step 3- exploratory data analysis and data cleaning
+stroke_df <-filter(stroke_df, gender!="Other" & work_type!="Never_worked") #filter out levels with few observations based off analysis above
+```
+```{r,echo=FALSE,fig.height=5, fig.width=11}
+#step 3- exploratory data analysis and data cleaning
+#histogram plot for age and average glucose level
+
+plot1<-gf_histogram(~age, data=stroke_df) +ggtitle("Histogram plot for Age")+ #create histogram plot for age
+   theme(plot.title = element_text(size = 12, face = "bold"))
+plot2<-gf_histogram(~avg_glucose_level, data=stroke_df) +ggtitle("Histogram plot for Average Glucose Level")+ #create histogram plot for average glucose level
+   theme(plot.title = element_text(size = 12, face = "bold"))
+
+grid.arrange(plot1, plot2, nrow=1,ncol=2)#show all plots
+```
+
+```{r,echo=FALSE,fig.height=8, fig.width=11}
+#step 3 log transform avg_glucose_level and BMI
+stroke_df<-stroke_df%>% 
+  mutate(log_avg_glucose_level=log(avg_glucose_level), log_bmi=log(bmi))%>%
+  select(-avg_glucose_level, -bmi)
+
+```
+
+```{r,echo=FALSE}
+#step 3- exploratory data analysis and data cleaning
+#construct a correlation plot to analyze correlation between numerical predictors.
+stroke_numeric = select_if(stroke_df, is.numeric)
+correlations <- cor(stroke_numeric , 
+                    use = "pairwise.complete.obs")
+# Make the correlation plot
+corrplot(correlations, 
+         type = "upper", order = "hclust", 
+         col = rev(brewer.pal(n = 8, name = "RdYlBu")))
+```
+
+```{r,echo=FALSE,fig.height=8, fig.width=11}
+#step 3 exploratory data analysis for numerical predictors
+#density curve analysis for age, log average glucose level, and log bmi by response
+
+plot1<-ggplot(stroke_df) + geom_density(aes(x = age, fill = stroke), alpha = 0.2)+ggtitle("Density Curve Comparison by Age to Response")+ #specify density curve for age with fill by stroke
+  theme(plot.title = element_text(size = 10, face = "bold"))
+plot2<-ggplot(stroke_df) + geom_density(aes(x = log_avg_glucose_level, fill = stroke), alpha = 0.2)+ggtitle("Density Curve Comparison by Log Average Glucose Levels to Response")+ #same as above except for log avg_gluc_level
+  theme(plot.title = element_text(size = 10, face = "bold"))
+plot3<-ggplot(stroke_df) + geom_density(aes(x = log_bmi, fill = stroke), alpha = 0.2)+ggtitle("Density Curve Comparison by Log BMI Levels to Response")+ #same as above except for log bmi
+  theme(plot.title = element_text(size = 10, face = "bold"))
+
+grid.arrange(plot1, plot2,plot3, ncol=2,nrow=2) #show all plots
+```
+
+
+```{r,echo=FALSE,fig.height=7, fig.width=10}
+#step 3 exploratory data analysis for categorical predictors
+#proportional bar chart for response by hypertension, heart disease, ever married, and work type.
+
+plot1<-stroke_df %>% 
+    group_by(hypertension) %>% #group by stroke_df by hypertension
+    count(stroke) %>%  #count response types
+    mutate(prop = n/sum(n)) %>%  #get proportions
+    ggplot(aes(x = hypertension, y = prop)) + #add proportions to plot
+    geom_col(aes(fill = stroke), position = "stack") + #make fill as response and specify stack position
+    geom_text(aes(label = scales::percent(prop), #add label
+                  y = prop, 
+                  group = stroke),
+              position = position_dodge(width = 0.9),
+              vjust =0.5)+ggtitle ("Response Proportional Analysis by Hypertension")+ #add title
+   theme(plot.title = element_text(size = 10, face = "bold")) #format title
+
+plot2<-stroke_df %>%  #same as plot 1 but group by heart disease
+    group_by(heart_disease) %>% 
+    count(stroke) %>% 
+    mutate(prop = n/sum(n)) %>% 
+    ggplot(aes(x = heart_disease, y = prop)) +
+    geom_col(aes(fill = stroke), position = "stack") +
+    geom_text(aes(label = scales::percent(prop), 
+                  y = prop, 
+                  group = stroke),
+              position = position_dodge(width = 0.9),
+              vjust =0.5)+ggtitle ("Response Proportional Analysis by Heart Disease")+
+   theme(plot.title = element_text(size = 10, face = "bold"))
+
+
+plot3<-stroke_df %>% #same as plot 1 but group by ever married
+  group_by(ever_married) %>%   
+  count(stroke) %>% 
+    mutate(prop = n/sum(n)) %>% 
+    ggplot(aes(x = ever_married, y = prop)) +
+    geom_col(aes(fill = stroke), position = "stack") +
+    geom_text(aes(label = scales::percent(prop), 
+                  y = prop, 
+                  group = stroke),
+              position = position_dodge(width = 0.9),
+              vjust =0.5)+ggtitle ("Response Proportional Analysis by Ever Married")+
+   theme(plot.title = element_text(size = 10, face = "bold"))
+
+plot4<-stroke_df %>% #same as plot 1 but group by work type
+    group_by(work_type) %>% 
+    count(stroke) %>% 
+    mutate(prop = n/sum(n)) %>% 
+    ggplot(aes(x = work_type, y = prop)) +
+    geom_col(aes(fill = stroke), position = "stack") +
+    geom_text(aes(label = scales::percent(prop), 
+                  y = prop, 
+                  group = stroke),
+              position = position_dodge(width = 0.9),
+              vjust =0.5)+ggtitle ("Response Proportional Analysis by Work Type")+
+   theme(plot.title = element_text(size = 10, face = "bold"))
+
+grid.arrange(plot1, plot2,plot3,plot4,nrow=2,ncol=2) #show plots
+```
+
+
+```{r,echo=FALSE,fig.height=8, fig.width=11}
+#step 3 exploratory data analysis for categorical predictors
+#proportional bar chart for response by gender, smoking status, and residence type.
+
+plot1<-stroke_df %>% 
+    group_by(gender) %>% #same as above plots except group by gender
+    count(stroke) %>% 
+    mutate(prop = n/sum(n)) %>% 
+    ggplot(aes(x = gender, y = prop)) +
+    geom_col(aes(fill = stroke), position = "stack") +
+    geom_text(aes(label = scales::percent(prop), 
+                  y = prop, 
+                  group = stroke),
+              position = position_dodge(width = 0.9),
+              vjust =0.5)+ggtitle ("Response Proportional Analysis by Gender")+
+   theme(plot.title = element_text(size = 10, face = "bold"))
+
+plot2<-stroke_df %>% 
+    group_by(smoking_status) %>% #same as above plots except group by smoking status
+    count(stroke) %>% 
+    mutate(prop = n/sum(n)) %>% 
+    ggplot(aes(x = smoking_status, y = prop)) +
+    geom_col(aes(fill = stroke), position = "stack") +
+    geom_text(aes(label = scales::percent(prop), 
+                  y = prop, 
+                  group = stroke),
+              position = position_dodge(width = 0.9),
+              vjust =0.5)+ggtitle ("Response Proportional Analysis by Smoking Status")+
+   theme(plot.title = element_text(size = 10, face = "bold"))
+
+plot3<-stroke_df %>% 
+    group_by(Residence_type) %>% #same as above plots except group by residence type
+    count(stroke) %>% 
+    mutate(prop = n/sum(n)) %>% 
+    ggplot(aes(x = Residence_type, y = prop)) +
+    geom_col(aes(fill = stroke), position = "stack") +
+    geom_text(aes(label = scales::percent(prop), 
+                  y = prop, 
+                  group = stroke),
+              position = position_dodge(width = 0.9),
+              vjust =0.5)+ggtitle ("Response Proportional Analysis by Residence Type")+
+   theme(plot.title = element_text(size = 10, face = "bold"))
+
+grid.arrange(plot1, plot2, plot3, nrow=2,ncol=2) #show all plots
+```
+
+
+
+
+```{r,echo=FALSE,fig.height=8, fig.width=11}
+##variables of interested from analysis in step 3: Smoking status, Ever Married, Work Type, Hypertension, Heart Disease, Age, BMI, Average Glucose Level
+#step 4a-5 fold inner CV for ANN and RF models
+set.seed(5) #set random seed
+
+weighted_brier_score_training <-function(data,lev,model) { #novel weighted brier score for training data
+  prob_stroke=data[,4] #find probability of a stroke
+  obs_is_stroke=ifelse(data$obs==lev[2],1,0) #classify if observation is a stroke
+  square_error=(prob_stroke- obs_is_stroke)^2 #find square error
+  weight_vec=ifelse(obs_is_stroke==1,200000,1) #assign weights, if observation is a stroke assign a weight of 2, otherwise assign a weight of 1 for non-stroke observations.
+  weighted_mse=weighted.mean(square_error, weight_vec) #calculated weighted MSE
+  output=c(-weighted_mse) #return negative weighted MSE since caret finds maximum values
+  names(output)="weighted_brier" #call metric 'weighted_brier'
+  return(output) #specify function to return output
+}
+
+groups = c(rep(1, 3357), rep(2, 1730)) # 1 represents the training set
+random_groups = sample(groups, 5087)
+in_train = (random_groups == 1)
+
+traindata.out<- stroke_df%>%
+  filter(in_train)
+testdata <- stroke_df %>%
+  filter(!in_train)
+
+ctrl = trainControl(method = "cv", number= 5, classProbs = TRUE,summaryFunction = weighted_brier_score_training) #specify weighted brier score to be used for training data
+
+#specify training data to be entire dataset
+###start of training models on entire dataset###
+
+model_1_rf_4a_weighted_brier_tune = train(stroke ~ ., #find optimal tree parameter for first rf model with weighted brier tune.
+  data = traindata.out, #specify training data to be entire dataset
+  method = "rf", #specify random forest to be used
+  metric = "weighted_brier", #specify metric to be weighted brier
+  tuneGrid = expand.grid(mtry = c(1,2,3, 4, 5, 6, 7, 8,9,10)), #tuning parameter range for number of variables for each tree split
+  trControl = ctrl) #specify 5 fold inner cv to be used with weighted brier score
+
+
+entire_data_rf_test = train(stroke ~ ., #find optimal tree parameter for first rf model with weighted brier tune.
+  data = stroke_df, #specify training data to be entire dataset
+  method = "rf", #specify random forest to be used
+  metric = "weighted_brier", #specify metric to be weighted brier
+  tuneGrid = expand.grid(mtry = c(1,2,3, 4, 5, 6, 7, 8,9,10)), #tuning parameter range for number of variables for each tree split
+  trControl = ctrl) #specify 5 fold inner cv to be used with weighted brier score
+
+
+
+
+
+
+```
+
+
+```{r,echo=FALSE,fig.height=8, fig.width=11}
+###start of checking if ann models converged for training on entire dataset###    
+#check if each sum is equal to 0 indicating convergence
+converge_check_model_2=ifelse(model_2_ann_4a_weighted_brier_tune$finalModel$convergence==0, paste("ANN model 2 has converged for training on entire dataset."),paste("ANN model 2 did not converge for training on entire dataset."))
+
+#print results
+print(converge_check_model_2, quote=FALSE) #print result for ann model 2
+###end of checking if ann models converged for entire dataset###
+```
+
+```{r,echo=FALSE}
+###results from fitting both models on training dataset###
+model_1_max_weighted_brier=max(model_1_rf_4a_weighted_brier_tune$results$weighted_brier) #find the best metric for first rf model
+model_2_max_weighted_brier=max(model_2_ann_4a_weighted_brier_tune$results$weighted_brier) #find the best metric for second ann model
+
+model_1_best_tune=model_1_rf_4a_weighted_brier_tune$bestTune$mtry #find best tuning parameter for first rf model
+model_2_best_tune=model_2_ann_4a_weighted_brier_tune$bestTune$size #find best tuning parameter for second ann model
+
+
+###print results of best metric and tuning parameter by each model
+model_1_training_results=paste("The best tuning parameter for mtry for the first random forest model was", model_1_best_tune, ",which corresponded to a weighted brier score of", round(model_1_max_weighted_brier,3),".")
+model_2_training_results=paste("The best tuning parameter for decay for the second ann model was", model_2_best_tune, ",which corresponded to a weighted brier score of", round(model_2_max_weighted_brier,3),".")
+
+print(model_1_training_results, quote=FALSE) #results for model 1
+print(model_2_training_results, quote=FALSE) #results for model 2
+
+```
+
+
+
+```{r,echo=FALSE}
+###step 4b 5-fold double CV with novel weighted brier score
+
+weighted_brier_score_test <-function(prob_yes_vec,obs) { #novel weighted brier score for test data
+  prob_stroke=prob_yes_vec #find probability of a stroke
+  obs_is_stroke=ifelse(obs=="Yes",1,0) #classify if observation is a stroke
+  square_error=(prob_stroke- obs_is_stroke)^2 #find square error
+  weight_vec=ifelse(obs_is_stroke==1,10,1) #assign weights, if observation is a stroke assign a weight of 2, otherwise assign a weight of 1 for non-stroke observations.
+  weighted_mse=weighted.mean(square_error, weight_vec) #calculated weighted MSE
+  output=c(-weighted_mse) #return negative weighted MSE since caret finds maximum values
+  names(output)="weighted_brier" #call metric 'weighted_brier'
+  return(output) #specify function to return output
+}
+
+weighted_brier_score_training <-function(data,lev,model) { #novel weighted brier score for training data
+  prob_stroke=data[,4] #find probability of a stroke
+  obs_is_stroke=ifelse(data$obs==lev[2],1,0) #classify if observation is a stroke
+  square_error=(prob_stroke- obs_is_stroke)^2 #find square error
+  weight_vec=ifelse(obs_is_stroke==1,10,1) #assign weights, if observation is a stroke assign a weight of 2, otherwise assign a weight of 1 for non-stroke observations.
+  weighted_mse=weighted.mean(square_error, weight_vec) #calculated weighted MSE
+  output=c(-weighted_mse) #return negative weighted MSE since caret finds maximum values
+  names(output)="weighted_brier" #call metric 'weighted_brier'
+  return(output) #specify function to return output
+}
+
+
+ctrl = trainControl(method = "cv", number= 5, classProbs = TRUE,summaryFunction = weighted_brier_score_training) #specify weighted brier score to be used for training data
+
+set.seed(50) #set random seed
+n = dim(stroke_df)[1] #find number of rows
+nfolds = 5 #specify number of folds for outer shell to be 5
+groups = rep(1:nfolds,length=n)  #produces list of group labels
+cvgroups = sample(groups,n) #get cv groups
+
+model_1_best_metric_each_fold=c() #initialize vector for the best metric for model 1 for each fold
+model_1_best_tune_par_each_fold=c() #initialize vector for the best tuning parameter for model 1 for each fold
+
+model_2_best_metric_each_fold=c() #initialize vector for the best metric for model 2 for each fold
+model_2_best_tune_par_each_fold=c() #initialize vector for the best tuning parameter for model 2 for each fold
+
+best_model_each_fold_vec=c() #vector to track the best model for each fold
+best_model_each_fold_test_metric=c() #vector to track the test metric 
+
+converge_check_model_2=c() ##vector for tracking if ann model 2 converged for each fold
+
+for (j in 1:nfolds)  {  #initialize 5 fold outer shell
+  groupj = (cvgroups == j) #find group in fold
+  traindata.out = stroke_df[!groupj,] #specify traindata.out as all data not in group
+  testdata=stroke_df[groupj,] #specify testdata as all data in group
+  dataused=traindata.out ####specify data to train model as traindata.out instead of the entire dataset
+  
+#####start of training models on traindata.out #####
+
+  
+  model_1_rf_4b_weighted_brier_tune = train(stroke ~ ., #find optimal tree parameter for first rf model with weighted brier tune.
+    data = dataused, #specify training data to be traindata.out
+    method = "rf", #specify random forest to be used
+    metric = "weighted_brier", #specify metric to be weighted brier
+    tuneGrid = expand.grid(mtry = c(1,2,3, 4, 5, 6, 7, 8,9,10)), #tuning parameter range for number of variables to try for each tree split
+    trControl = ctrl) #specify 5 fold inner cv to be used with weighted brier score
+   
+    
+  model_2_ann_4b_weighted_brier_tune = train(stroke ~ .,  #find optimal weight decay parameter for second ann model.
+                        data = dataused, #specify training data to be traindata.out
+                        method = "nnet", #specify neural net to be used.
+                        metric = "weighted_brier",
+                        tuneGrid = expand.grid(size = 1, decay = c(10^(-c(1:7)), 0,10, 10^2, 10^4,10^6)), #tuning parameter range for weight decay
+                        preProc = c("center", "scale"), #scale and center the data to help achieve convergence
+                        maxit = 2000, #raise max iterations to help achieve convergence
+                        trace = FALSE, #change to false to hide iterations in output
+                        trControl = ctrl) #specify 5 fold inner cv to be used with weighted brier score
+  
+#####end of training all models on traindata.out #####
+  
+###start of tracking best metrics and tuning parameters for both models for each fold###
+
+  model_1_best_metric=round(max(model_1_rf_4b_weighted_brier_tune$results$weighted_brier),3) #find best metric for model 1 for fold
+  model_1_best_metric_each_fold=c(model_1_best_metric_each_fold,model_1_best_metric) #add best metric for model 1 for fold to tracking vector
+  model_1_best_tune_par_each_fold=c(model_1_best_tune_par_each_fold,model_1_rf_4b_weighted_brier_tune$bestTune$mtry) #add best tuning parameter to tracking vector
+
+  model_2_best_metric=round(max(model_2_ann_4b_weighted_brier_tune$results$weighted_brier),3) #find best metric for model 2 for fold
+  model_2_best_metric_each_fold=c(model_2_best_metric_each_fold,model_2_best_metric) #add best metric for model 2 for fold to tracking vector
+  model_2_best_tune_par_each_fold=c(model_2_best_tune_par_each_fold, round(model_2_ann_4b_weighted_brier_tune$bestTune$decay,3)) #add best tuning parameter to tracking vector
+  
+###end of tracking best metrics and tuning parameters for both models for each fold###
+  
+###start of fitting best model on test data for fold###
+  
+  if (model_1_best_metric>model_2_best_metric){ #if model 1 has the best metric
+    best_model_each_fold_vec=c(best_model_each_fold_vec, "model_1_rf") #record model 1 as best model for fold
+    model_prediction=predict(model_1_rf_4b_weighted_brier_tune,testdata,type = "prob") #find model 1 probability prediction for test data
+    fold_test_metric=weighted_brier_score_test(model_prediction$Yes,testdata$stroke) #apply the weighted brier score function for test data to find test metric
+    best_model_each_fold_test_metric=c(best_model_each_fold_test_metric,round(fold_test_metric,3)) #add test metric to tracking vector
+  }
+  else { #if model 2 has the best metric
+    best_model_each_fold_vec=c(best_model_each_fold_vec, "model_2_ann") #record model 2 as best model for fold
+    model_prediction=predict(model_2_ann_4b_weighted_brier_tune,testdata,type = "prob") #find model21 probability prediction for test data
+    fold_test_metric=weighted_brier_score_test(model_prediction$Yes,testdata$stroke) #apply the weighted brier score function for test data to find test metric
+    best_model_each_fold_test_metric=c(best_model_each_fold_test_metric,round(fold_test_metric,3)) #add test metric to tracking vector
+  }
+  
+###end of fitting best model on test data for fold###  
+
+###warning output deleted, check results below###
+}
+```
+
+
+```{r,echo=FALSE}
+#check if each sum is equal to 0 for vector indicating convergence for ann model 2 for all folds
+converge_check_model_3=ifelse(sum(converge_check_model_2)==0, paste("Ann model 2 has converged for all 5 folds."),paste("Ann model 2 did not converge for training on traindata.out."))
+
+print(converge_check_model_3, quote=FALSE) #print result for ann model 2
+
+```
+
+```{r,echo=FALSE}
+###comparison of training data fit for model 1 and model 2
+##create dataframe with results
+results_4b_model_comparison <- data.frame (model_1_best_metric_by_fold  = model_1_best_metric_each_fold, #best metric for model 1 for each fold
+                  model_1_best_tune_par_by_fold = model_1_best_tune_par_each_fold, #best tuning parameter for model 1 for each fold
+                  model_2_best_metric_by_fold=model_2_best_metric_each_fold, #best metric for model 2 for each fold
+                  model_2_best_tune_par_by_fold=model_2_best_tune_par_each_fold, #best tuning parameter for model 2 for each fold
+                  fold=c(1,2,3,4,5)) #fold
+
+head(results_4b_model_comparison) #display dataframe
+```
+
+```{r,echo=FALSE,fig.height=8, fig.width=14}
+###results for best model fit on testdata
+##create dataframe with results
+best_models_test_metric<-data.frame (
+                  best_model_by_fold=best_model_each_fold_vec, #best model by fold
+                  best_model_by_fold_test_metric=best_model_each_fold_test_metric, #test metric using best model by fold
+                  fold=c(1,2,3,4,5)) #fold
+
+head(best_models_test_metric) #display dataframe
+```
+
+```{r,echo=FALSE}
+best_model_honest_assessment=paste("The first random forest model was the best model in each fold, the average weighted brier metric for honest assessment on all test folds was", round(mean(best_model_each_fold_test_metric),3))
+print(best_model_honest_assessment, quote=FALSE)
+```
+```{r,echo=FALSE,fig.height=8, fig.width=14}
+###step 4, fit final model to entire dataset. Final model will be random forest model with mtry=8 as tuning parameter
+final_model_rf_fit=predict(model_1_rf_4a_weighted_brier_tune,stroke_df) ##fit final model to entire dataset
+```
+
+
+```{r,echo=FALSE,fig.height=8, fig.width=14}
+###step 5, find most important variables from final model in caret
+varImp(model_1_rf_4a_weighted_brier_tune) ##first find by using the variable importance function from caret package
+```
+```{r,echo=FALSE}
+###step 5, find most important variables from final model in caret
+varImpPlot(model_1_rf_4a_weighted_brier_tune$finalModel, main="Gini Plot for Final RF Model") #find gini plot
+```
+```{r,echo=FALSE,fig.height=8, fig.width=14}
+###find difference in mean values for log_bmi and log_average_glucose_levels for stroke and non-stroke patients
+mean_log_avg_glucose_level_non_stroke=mean(filter(stroke_df, stroke=="No")$log_avg_glucose_level) #find average log_avg_glucose_level for non-stroke patients
+mean_log_avg_glucose_level_stroke=mean(filter(stroke_df, stroke=="Yes")$log_avg_glucose_level) #find average log_avg_glucose_level for stroke patients
+
+mean_log_bmi_level_non_stroke=mean(filter(stroke_df, stroke=="No")$log_bmi) #find average log_bmi level for non-stroke patients
+mean_log_bmi_level_stroke=mean(filter(stroke_df, stroke=="Yes")$log_bmi) #find average log_bmi level for stroke patients
+
+##summary results for average log_bmi levels and log_avg_glucose_levels for stroke and non-stroke patients
+log_bmi_data=paste("The average log BMI level for stroke patients is", round(mean_log_bmi_level_stroke,3), ", while the average log BMI level for non-stroke patients is",round(mean_log_bmi_level_non_stroke,3),". This corresponds to a difference of",round(mean_log_bmi_level_stroke-mean_log_bmi_level_non_stroke,3),".")  
+
+log_gluc_data=paste("The average log average glucose level for stroke patients is", round(mean_log_avg_glucose_level_stroke,3), ", while the average log average glucose level for non-stroke patients is",round(mean_log_avg_glucose_level_non_stroke,3),". This corresponds to a difference of",round(mean_log_avg_glucose_level_stroke-mean_log_avg_glucose_level_non_stroke,3),".")  
+
+print(log_bmi_data, quote=FALSE) #display result for log_bmi
+print(log_gluc_data, quote=FALSE) #display result for log_gluc
+```
+```{r}
+###create plot for probability of stroke by different values for log_avg_glucose_level
+###dataframe below has most frequent values for factor variables, median values for age and log_bmi, and a sequence of 100 values for log_avg_gluc_level
+
+xgrid = expand.grid(hypertension="No",heart_disease="No", ever_married="Yes", work_type="Private", gender="Female", smoking_status="never smoked",Residence_type="Urban",age=median(stroke_df$age),log_bmi=median(stroke_df$log_bmi), log_avg_glucose_level=seq(min(stroke_df$log_avg_glucose_level), max(stroke_df$log_avg_glucose_level), length = 100)) #specify 100 points to be used for log average glucose levels from lowest to highest observed values
+
+prob_gluc_level = predict(model_1_rf_4a_weighted_brier_tune, newdata = xgrid, type="prob") #get probability of stroke from final model for various glucose levels
+
+xgrid <- xgrid %>%
+  mutate(prob_stroke = prob_gluc_level$Yes) #add probability of stroke to dataframe
+
+xgrid%>%gf_point(prob_stroke~log_avg_glucose_level) + #create plot
+  geom_line()+ggtitle("Probability of Stroke by Log Average Glucose Level from Final RF Model")
+
+
+```
+
+```{r}
+###create plot for probability of stroke by different values for log_bmi
+###dataframe below has most frequent values for factor variables, median values for age and log_avg_gluc_level, and a sequence of 100 values for log_bmi
+
+xgrid = expand.grid(hypertension="No",heart_disease="No", ever_married="Yes", work_type="Private", gender="Female", smoking_status="never smoked",Residence_type="Urban",age=median(stroke_df$age),log_avg_glucose_level=median(stroke_df$log_avg_glucose_level), log_bmi=seq(min(stroke_df$log_bmi), max(stroke_df$log_bmi), length = 100)) #specify 100 points to be used for log bmi levels from lowest to highest observed values
+
+prob_bmi_level = predict(model_1_rf_4a_weighted_brier_tune, newdata = xgrid, type="prob") #get probability of stroke from final model for various bmi levels
+
+xgrid <- xgrid %>%
+  mutate(prob_stroke = prob_bmi_level$Yes) #add probability of stroke to dataframe
+
+xgrid%>%gf_point(prob_stroke~log_bmi) + #create plot
+  geom_line()+ggtitle("Probability of Stroke by Log BMI from Final RF Model")
+
+
+```
+
+```{r,echo=FALSE,fig.height=8, fig.width=14}
+plot(model_1_rf_4a_weighted_brier_tune, main="Weighted Brier Metric by Tuning Parameter Range for Final Model")
+```
+
+```{r,echo=FALSE}
+### find overall accuracy, stroke accuracy, and non-stroke accuracy on validation set for final model by probability of yes threshold
+##results to be returned in a plot##
+set.seed(5)
+
+groups = c(rep(1, 3357), rep(2, 1730)) # 1 represents the training set
+random_groups = sample(groups, 5087)
+in_train = (random_groups == 1)
+
+traindata.out<- stroke_df%>%
+  filter(in_train)
+testdata <- stroke_df %>%
+  filter(!in_train)
+
+baseline_model=randomForest(stroke ~ ., data = traindata.out,
+                         mtry = 3, importance = TRUE)
+
+baseline_model_probs=predict(baseline_model,newdata=testdata,type = "prob") 
+baseline_model_probs=as.data.frame(baseline_model_probs)
+
+actual_stroke=testdata$stroke
+
+threshold_list<-seq(0, 1, by = 0.01) #vector for probability thresholds between 0 and 1 in increments of 0.01.
+accuracy_vec<-c() #initialize overall accuracy vector. 
+non_stroke_vec<-c() #initialize vector for accuracy for non-stroke patients
+stroke_vec<-c() #initialize vector for accuracy for stroke patients
+overall_sum_testata = length(testdata$stroke)
+stroke_testdata = length(testdata$stroke[testdata$stroke=="Yes"])
+non_stroke_testdata = length(testdata$stroke[testdata$stroke=="No"])
+for (i in threshold_list) { #for each probability in threshold list
+  model_preds=ifelse(i>baseline_model_probs$Yes,"No","Yes") #assign temporary classifications based on if temporary threshold is greater than probabilities in final model
+  model_preds=as.factor(model_preds) #get predictions as factor
+  temp_conf_mat=table(actual_stroke,model_preds) #create temporary confusion matrix
+  if(ncol(temp_conf_mat)<2){ #if number of column in temp matrix is less than 2
+     if(i>baseline_model_probs$Yes) { #based on value of i, either calculate for stroke or non-stroke accuracy
+      non_stroke_accuracy_model_temp=round(temp_conf_mat[1,1]/non_stroke_testdata,3) #calculate non-stroke accuracy
+      stroke_accuracy_temp=0 #stroke accuracy will be 0
+      ovr_accuracy_temp=round(temp_conf_mat[1,1]/overall_sum_testata,3) #calculate overall accuracy
+     }
+    else {
+      stroke_accuracy_model_temp=round(temp_conf_mat[2,1]/stroke_testdata,3) #calculate stroke accuracy
+      non_stroke_accuracy_temp=0 #non stroke accuracy will be 0
+      ovr_accuracy_temp=round(temp_conf_mat[2,1]/overall_sum_testata,3) #calculate overall accuracy
+    }
+  }
+  else { #if confusion matrix is normal 2 rows and 2 columns
+     ovr_accuracy_temp=round(sum(diag(temp_conf_mat))/overall_sum_testata,3) #calculate overall accuracy
+     non_stroke_accuracy_temp=round(temp_conf_mat[1,1]/non_stroke_testdata,3) #calculate non-stroke accuracy
+     stroke_accuracy_model_temp=round(temp_conf_mat[2,2]/stroke_testdata,3) #calculate stroke accuracy
+  }
+     accuracy_vec<-c(accuracy_vec,ovr_accuracy_temp) #append overall accuracy vector
+     non_stroke_vec<-c(non_stroke_vec,non_stroke_accuracy_temp) #append non stroke accuracy vector
+     stroke_vec<-c(stroke_vec,stroke_accuracy_model_temp) #append stroke accuracy vector
+} 
+accuracy_df = data.frame(overall_accuracy = accuracy_vec,non_stroke_accuracy=non_stroke_vec,
+                         stroke_accuracy=stroke_vec, thresholds=threshold_list) #create accuracy dataframe with results from 3 vectors
+
+
+###start of creating plot which shows stroke, non-stroke, and overall accuracy by probability of yes threshold ###
+ggplot() +  
+  geom_line(data = accuracy_df, aes(x = threshold_list, y = overall_accuracy, color = "Overall Accuracy")) +
+  geom_line(data = accuracy_df, aes(x = threshold_list, y = non_stroke_accuracy, color = "Non-Stroke Accuracy")) + geom_line(data = accuracy_df, aes(x = threshold_list, y = stroke_accuracy, color = "Stroke Accuracy"))+
+  xlab('Probability of Stroke  Threshold') +
+  ylab('Accuracy') +
+  labs(color="Accuracy Type") + 
+  ggtitle ("Accuracy Types By Probability of Stroke Thresholds for Random Forest Model")+
+   theme(plot.title = element_text(size = 12, face = "bold"))+geom_vline(xintercept=0.07,linetype="dotted")
+###end of creating plot which shows stroke, non-stroke, and overall accuracy by probability of yes threshold ###
+```
+
+```{r,echo=FALSE}
+set.seed(5)
+
+groups = c(rep(1, 3357), rep(2, 1730)) # 1 represents the training set
+random_groups = sample(groups, 5087)
+in_train = (random_groups == 1)
+
+traindata.out<- stroke_df%>%
+  filter(in_train)
+testdata <- stroke_df %>%
+  filter(!in_train)
+
+
+
+baseline_model=randomForest(stroke ~ ., data = traindata.out, ##get baseline model using same traindata.out as models from step 4B (fold 5)
+                         mtry = 8, importance = TRUE)
+
+baseline_model_probs=predict(baseline_model,newdata=testdata,type = "prob") 
+#ann_model_4a_probs=predict(model_2_ann_4a_weighted_brier_tune,newdata=testdata,type = "prob")
+#ann_model_4b_probs=predict(model_2_ann_4b_weighted_brier_tune,newdata=testdata,type = "prob")
+baseline_model_probs=as.data.frame(baseline_model_probs)
+#ann_model_4a_prob2s=predict(model_2_ann_4a_accuracy_tune,newdata=testdata,type = "prob")
+
+rf_model_4a_probs=predict(model_1_rf_4a_weighted_brier_tune,newdata=testdata,type = "prob")
+#ann_model_4a_probs=predict(model_2_ann_4a_weighted_brier_tune,newdata=testdata,type = "prob")
+
+whole_data_probs=predict(entire_data_rf_test,newdata=testdata,type = "prob")
+#hist(ann_model_4a_probs$Yes) ###histogram for model 4a ann model
+#hist(ann_model_4b_probs$Yes) ###histogram for model 4b ann model
+
+
+mean(baseline_model_probs$Yes)
+#mean(ann_model_4b_probs$Yes[1:45])
+mean(rf_model_4a_probs$Yes)
+#factor_ann_model_4a_probs=as.factor(ann_model_4a_probs$Yes)
+mean(baseline_model_probs$Yes[1:89])
+mean(rf_model_4a_probs$Yes[1:89])
+```
+
+
+```{r,echo=FALSE,fig.height=8, fig.width=14}
+mean(baseline_model_probs$Yes)
+#mean(ann_model_4b_probs$Yes[1:45])
+mean(rf_model_4a_probs$Yes)
+mean(whole_data_probs$Yes)
+#factor_ann_model_4a_probs=as.factor(ann_model_4a_probs$Yes)
+mean(baseline_model_probs$Yes[1:89])
+mean(rf_model_4a_probs$Yes[1:89])
+mean(whole_data_probs$Yes[1:89])
+
+##try t-test. Model working good?
+```
+
+```{r,echo=FALSE,fig.height=8, fig.width=14}
+xgrid = data.frame(baseline_yes=baseline_model_probs$Yes, caret_yes=rf_model_4a_probs$Yes, obs=testdata$stroke)
+
+gf_point(baseline_yes~caret_yes,data=xgrid,col=~obs,cex=2)
+```
